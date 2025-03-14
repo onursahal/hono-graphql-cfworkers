@@ -14,6 +14,8 @@
     "@neondatabase/serverless": "^0.10.4",
     "dotenv": "^16.4.7",
     "drizzle-orm": "^0.39.3",
+    "graphql": "^16.10.0",
+    "graphql-yoga": "^5.13.1",
     "hono": "^4.7.0",
     "zod": "^3.23.8"
   },

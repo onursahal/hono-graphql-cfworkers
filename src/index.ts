@@ -1,56 +1,85 @@
-import { instrument } from "@fiberplane/hono-otel";
-import { createFiberplane, createOpenAPISpec } from "@fiberplane/hono";
 import { neon } from "@neondatabase/serverless";
-import { drizzle } from "drizzle-orm/neon-http";
+import { drizzle, NeonHttpDatabase } from "drizzle-orm/neon-http";
 import { Hono } from "hono";
+import { eq } from "drizzle-orm";
 import { users } from "./db/schema";
+import { createSchema, createYoga } from "graphql-yoga";
+import { getContext, contextStorage } from "hono/context-storage";
+import * as dbSchema from "./db/schema";
+import { logger } from "hono/logger";
 
-type Bindings = {
+type HonoBindings = {
   DATABASE_URL: string;
 };
 
-const app = new Hono<{ Bindings: Bindings }>();
+type HonoVariables = {
+  dbConnectionString: string;
+};
 
-app.get("/", (c) => {
-  return c.text("Honc! 🪿");
+type YogaContext = {
+  db: NeonHttpDatabase<typeof dbSchema>;
+};
+
+const app = new Hono<{ Bindings: HonoBindings; Variables: HonoVariables }>();
+
+app.use(logger());
+app.use(contextStorage());
+
+app.use(async (c, next) => {
+  c.set("dbConnectionString", c.env.DATABASE_URL);
+  return next();
 });
 
-app.get("/api/users", async (c) => {
-  const sql = neon(c.env.DATABASE_URL);
-  const db = drizzle(sql);
+const schema = createSchema({
+  typeDefs: /* graphql */ `
+    type Query {
+      getUser(id: String!): User
+    }
 
-  return c.json({
-    users: await db.select().from(users),
-  });
-});
-
-/**
- * Serve a simplified api specification for your API
- * As of writing, this is just the list of routes and their methods.
- */
-app.get("/openapi.json", c => {
-  // @ts-expect-error - @fiberplane/hono is in beta and still not typed correctly
-  return c.json(createOpenAPISpec(app, {
-    openapi: "3.0.0",
-    info: {
-      title: "Honc D1 App",
-      version: "1.0.0",
+    type User {
+      id: String!
+      first_name: String!
+      last_name: String!
+      email: String!
+      createdAt: String!
+    }
+  `,
+  resolvers: {
+    Query: {
+      getUser: async (
+        _: unknown,
+        { id }: { id: string },
+        context: YogaContext
+      ) => {
+        const user = await context.db
+          .select()
+          .from(users)
+          .where(eq(users.id, id));
+        console.log("user", JSON.stringify(user, null, 2));
+        return user[0];
+      },
     },
-  }))
+  },
 });
 
-/**
- * Mount the Fiberplane api explorer to be able to make requests against your API.
- * 
- * Visit the explorer at `/fp`
- */
-app.use("/fp/*", createFiberplane({
-  app,
-  openapi: { url: "/openapi.json" }
-}));
+const yoga = createYoga<YogaContext>({
+  schema,
+  graphqlEndpoint: "/graphql",
+});
+
+// Handle GraphQL requests with proper DB connection
+app.use("/graphql", async (c) => {
+  const sql = neon(c.env.DATABASE_URL);
+  const db: NeonHttpDatabase<typeof dbSchema> = drizzle(sql);
+
+  const yogaHandler = async (request: Request) => {
+    const response = await yoga.handleRequest(request, {
+      db,
+    });
+    return response;
+  };
+
+  return yogaHandler(c.req.raw);
+});
 
 export default app;
-
-// Export the instrumented app if you've wired up a Fiberplane-Hono-OpenTelemetry trace collector
-//
-// export default instrument(app);
